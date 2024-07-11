@@ -2,9 +2,11 @@
 for reading and writing data in NWB format
 '''
 import os.path
+import pdb
 import warnings
 from pathlib import Path
 from copy import deepcopy
+import inspect
 import subprocess
 import pickle
 import h5py
@@ -155,6 +157,34 @@ def load_namespaces(**kwargs):
     namespace_path = getargs('namespace_path', kwargs)
     return __TYPE_MAP.load_namespaces(namespace_path)
 
+# a function to register a container classes with the global map
+@docval({'name': 'neurodata_type', 'type': str, 'doc': 'the neurodata_type to get the spec for'},
+        {'name': 'namespace', 'type': str, 'doc': 'the name of the namespace'},
+        {"name": "container_cls", "type": type, "doc": "the class to map to the specified neurodata_type",
+         'default': None},
+        is_method=False)
+def register_class(**kwargs):
+    """Register an NWBContainer class to use for reading and writing a neurodata_type from a specification
+    If container_cls is not specified, returns a decorator for registering an NWBContainer subclass
+    as the class for neurodata_type in namespace.
+    """
+    neurodata_type, namespace, container_cls = getargs('neurodata_type', 'namespace', 'container_cls', kwargs)
+    def _dec(cls):
+        try:
+            __TYPE_MAP.register_container_type(namespace, neurodata_type, cls)
+        except KeyError as e:
+            # happens when unpickling, the effects of the register_container_type
+            # call will be restored, but the unpickling is sensitive to order
+            if os.environ.get('PYNWB_UNPICKLING', '') == 'True':
+                return cls
+            else:
+                raise e
+
+        return cls
+    if container_cls is None:
+        return _dec
+    else:
+        _dec(container_cls)
 
 def _git_cmd(*args) -> subprocess.CompletedProcess:
     """
@@ -183,6 +213,15 @@ def _clone_submodules():
         raise RuntimeError("'core' is not a registered namespace, and pynwb doesn't seem to be installed"
                            "from a cloned repository so the submodules can't be initialized. "
                            "Something has gone terribly wrong. maybe try reinstalling???")
+
+def _import_core_modules():
+    """
+    Importing the modules with the container classes has a side-effect
+    of adding them to the global __TYPE_MAP, so when creating the cached __TYPE_MAP,
+    we need to import them for the side effect, which is separate from importing
+    them into the module for the sake of declaring a public API.
+    """
+    from . import core, base, file, behavior, device, ecephys, epoch, icephys, image, misc, ogen, ophys, legacy  # noqa: F401,E402,F811
 
 
 def _load_core_namespace(final:bool=False):
@@ -214,11 +253,18 @@ def _load_core_namespace(final:bool=False):
     # load pickled typemap if we have one
     if os.path.exists(__resources['cached_typemap_path']):
         with open(__resources['cached_typemap_path'], 'rb') as f:
+            # set an env variable as a flag so objects with complex
+            # import side effects can tell they're being imported
+            # in an unpickling context
+            os.environ['PYNWB_UNPICKLING'] = 'True'
             __TYPE_MAP = pickle.load(f)
+            del os.environ['PYNWB_UNPICKLING']
 
     # otherwise make a new one and cache it
     elif os.path.exists(__resources['namespace_path']):
+        pdb.set_trace()
         load_namespaces(__resources['namespace_path'])
+        _import_core_modules()
         with open(__resources['cached_typemap_path'], 'wb') as f:
             pickle.dump(__TYPE_MAP, f, protocol=pickle.HIGHEST_PROTOCOL)
         with open(__resources['cached_version_indicator'], 'w') as f:
@@ -242,28 +288,6 @@ _load_core_namespace()
 def available_namespaces():
     """Returns all namespaces registered in the namespace catalog"""
     return __NS_CATALOG.namespaces
-
-
-# a function to register a container classes with the global map
-@docval({'name': 'neurodata_type', 'type': str, 'doc': 'the neurodata_type to get the spec for'},
-        {'name': 'namespace', 'type': str, 'doc': 'the name of the namespace'},
-        {"name": "container_cls", "type": type, "doc": "the class to map to the specified neurodata_type",
-         'default': None},
-        is_method=False)
-def register_class(**kwargs):
-    """Register an NWBContainer class to use for reading and writing a neurodata_type from a specification
-    If container_cls is not specified, returns a decorator for registering an NWBContainer subclass
-    as the class for neurodata_type in namespace.
-    """
-    neurodata_type, namespace, container_cls = getargs('neurodata_type', 'namespace', 'container_cls', kwargs)
-
-    def _dec(cls):
-        __TYPE_MAP.register_container_type(namespace, neurodata_type, cls)
-        return cls
-    if container_cls is None:
-        return _dec
-    else:
-        _dec(container_cls)
 
 
 @docval({'name': 'h5py_file', 'type': h5py.File, 'doc': 'An NWB file'}, rtype=tuple,
